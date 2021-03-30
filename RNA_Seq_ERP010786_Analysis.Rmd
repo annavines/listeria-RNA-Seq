@@ -1,0 +1,593 @@
+---
+title: "RNA-Seq Analysis (ERP010786)"
+author: "Anna Vines"
+date: "22/12/2020"
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 4  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, include = FALSE}
+setwd("C:\\Users\\annaj\\OneDrive - University of Bristol\\Extracurricular\\UTSA")
+```
+
+```{r, include = FALSE}
+#Importing initial libraries:
+library(ggplot2)
+library(DESeq2)
+library(Biostrings)
+library(GenomicRanges)
+library(dplyr)
+```
+
+
+
+
+
+
+ 
+```{r, include=FALSE}
+#Loading the ERP010786 data of listeria patients vs controls and checking its head:
+load("ERP010786.rda")
+head(assay(se))
+```
+
+```{r, include=FALSE}
+#Exploration of se's class, row data and column data:
+print(class(se))
+rowData(se)
+colData(se)
+```
+
+```{r, include=FALSE}
+#Getting rid of version number from row names:
+rownames(se) <- gsub(rownames(se), pattern = "\\..+", replacement = "")
+```
+```{r, include=FALSE}
+#Checking class
+class(se)
+```
+
+# Introduction 
+
+This analysis seeks to explore the differentially expressed genes found in listeria patients compared to healthy controls. The .rda data used in this analysis - ERP010786 - is publicly available and was taken from [Recount2](https://jhubiostatistics.shinyapps.io/recount/), where it had previously been prepared for downstream analysis. More information about ERP010786 can be found on its [NCBI SRA page](https://www.ncbi.nlm.nih.gov/Traces/study/?acc=ERP010786&o=acc_s%3Aa). In order to determine DEGs, as well as the top pathways as found through GSEA, R and various Bioconductor packages have been used including DESeq2 and MSigDB. 
+
+This report has been carried out as an RNA-Seq training project for Bishop Lab, UTSA and the Bioinformatics Research Network. 
+
+<br>
+
+# Differential Expression Analysis 
+
+<br>
+
+```{r, include=FALSE}
+#Checking DESeq2 vignette:
+#vignette("DESeq2")
+```
+
+```{r, include=FALSE}
+#Creating a DESeq Dataset from se.  
+dds <- DESeqDataSet(se, design = ~ condition)
+head(dds)
+
+#After research, chose not to remove duplicates due to low number as well as that removing duplicates may not help accuracy or precision - https://www.nature.com/articles/srep25533 
+```
+
+```{r, include=FALSE}
+#An alternative method for creating a DESeq Dataset:
+#countMat <- assay(se)
+#sampleInfo <-as.data.frame(colData(se))
+#ddsMat <-DESeqDataSetFromMatrix(countData = countMat,colData = sampleInfo,design = ~ condition)
+```
+
+
+
+```{r, include=FALSE}
+#VS transforming dds:
+vst_dds <- vst(dds, blind = TRUE)
+head(vst_dds)
+```
+
+### Quality control checks 
+
+Prior to the performance of differential expression analysis, the data underwent a variance-stabilising transformation and then principal component analysis (PCA). The resulting plot shown below, coloured by condition of interest, shows large differences between biological groups and clustering within conditions. The heatmap showing sample-level distance also shows significant separation between conditions. Together, this signals that there are likely biological differences between conditions and the data appears to be high quality. 
+
+
+**The PCA plot of ERP010786:**
+
+```{r, include=TRUE}
+pcaplt <- plotPCA(vst_dds, intgroup = "condition")
+
+pcaplt <- pcaplt + theme_classic() 
+
+pcaplt
+```
+
+**The heatmap showing hierarchical clustering of ERP010786:**
+
+```{r, include = FALSE}
+library("pheatmap")
+library("RColorBrewer")
+```
+```{r, include = FALSE}
+#Finding sample distances for qc heatmap 
+sampleDists <- dist(t(assay(vst_dds)))
+sampleDists
+```
+```{r}
+
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vst_dds$condition, vst_dds$run, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colours <- colorRampPalette(rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colours)
+```
+
+
+
+```{r, include=FALSE}
+#Performing DE Analysis: 
+dds <- DESeq(dds)
+```
+
+<br>
+
+
+### Plots of differential expression  
+
+After checking the PCA plot above for clear clustering by condition, DE analysis was performed with DESeq2. The plot of dispersion estimates is encouraging, as it shows the data scattered around the curve but still following its shape, and dispersion decreases as mean expression levels increase. An MA plot was used to visualise gene expression changes between conditions. Both over and underexpressed genes were seen, with points correctly centred around the M=0 line.  
+
+**A dispersion plot of ERP010786:**
+
+```{r, include=TRUE}
+plotDispEsts(dds)
+```
+
+
+
+```{r, include=FALSE}
+#Extracting results from dds:
+res = results(dds, contrast = c("condition", "Uninfected", "Infected"))
+```
+
+
+**An MA plot of DEGs from ERP010786:**
+
+```{r, include=TRUE}
+DESeq2::plotMA(res, ylim = c(-4, 4))
+```
+
+
+
+```{r, include=FALSE}
+#Finding significant results within res:
+sig_res_criteria <- which(res$padj <= 0.01 & 
+                 abs(res$log2FoldChange) >= 1)
+#Note: Need to explore best practices for baseMean
+```
+ 
+```{r, include=FALSE}
+#Creating sigres, containing all the rows in res which meet significance criteria: 
+sigres <- res[sig_res_criteria, ]
+```
+```{r, include=FALSE}
+head(sigres)
+```
+```{r}
+#rownames(sigres) - note: loads whole thing, should have been head
+```
+
+
+
+```{r, include=FALSE}
+#Creating a new logical column on res in order to colour volcano plot based on whether significance threshold is met:
+res_sigcol <- data.frame(res) %>% mutate(threshold = padj <= 0.01)
+```
+
+<br>
+
+### Using a volcano plot to show statistical significance in differential expression
+
+While the above plots give a sense of differential expression, they do not allow for an understanding of statistical significance. In order to do so, a volcano plot coloured by whether the p-adjusted value of a particular gene's differential expression is less than or equal to 0.01 is produced. The volcano plot shows many statistically signficant differentially expressed genes.  
+
+
+```{r, include=FALSE}
+volcanoplot <- ggplot(res_sigcol)+
+  geom_point(aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+        xlab("log2 fold change") + 
+        ylab("-log10 adjusted p-value") + 
+        theme(legend.position = "none", 
+              plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25)))
+
+volcanoplot <- volcanoplot + theme_classic()
+
+#Note: explore EnhancedVolcano next time for prettier graphs
+```
+
+**A volcano plot of the DEGs from ERP010786. Blue points are statistically significant:**
+
+```{r, include = TRUE, warning= FALSE}
+volcanoplot
+```
+
+
+<br>
+
+```{r, include=FALSE}
+#Adding ENSEMBL and SYMBOL IDs to sigres:
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+```
+```{r, include = FALSE}
+anno <- AnnotationDbi::select(org.Hs.eg.db, rownames(sigres),
+               columns = c("ENSEMBL", "ENTREZID", "SYMBOL"),
+               keytype = "ENSEMBL")
+sigres <- cbind(ENSEMBL = rownames(sigres), sigres)
+anno_sigres <- left_join(as.data.frame(sigres), anno)
+head(anno_sigres)
+#Note: have to use sigres, not the ordered-sigres like had been originally trying.
+```
+
+```{r, include=FALSE}
+#Creating ordered significant results:
+order_sigres <- anno_sigres[order(anno_sigres$padj),]
+```
+
+```{r, include=FALSE}
+#Adding ID names to have column and row names on the heatmap:
+ID1 <- order_sigres$ENSEMBL
+ID2 <- order_sigres$SYMBOL
+mat <- assay(vst_dds)
+```
+
+```{r, include=FALSE}
+# up Top 20 genes to use on the heatmap:
+top_DEgenes <- mat[order_sigres$ENSEMBL,]
+rownames(top_DEgenes) <- ID2
+top20_DE <- head(top_DEgenes, n=20)
+
+```
+
+```{r, include=FALSE}
+#Checking that the ENSEMBL column and rownames are working:
+order_sigres$ENSEMBL
+```
+```{r, include=FALSE}
+rownames(top20_DE)
+```
+
+
+
+```{r, include=FALSE}
+#Annotations for the heatmap:
+annotation <- data.frame("condition" = colData(vst_dds)$condition,
+                         row.names = rownames(colData(vst_dds)))
+```
+
+
+### Plotting the Top 20 Statistically Significant DE genes
+
+Finally, a heatmap showing the top 20 statistically significant differentially expressed genes in infected patients compared to controls is created. This shows large differences between infected and uninfected samples. A searchable table of all statistically significant differentially expressed genes (ordered by p-adjusted value) can be found below the heatmap. 
+
+<br>
+
+**A heatmap showing the top 20 DE genes:** 
+
+```{r, include=FALSE}
+library(pheatmap)
+library(RColorBrewer)
+```
+```{r, include=TRUE}
+pheatmap(top20_DE, color = colorRampPalette(rev(brewer.pal(n = 7, name = "Spectral")))(100), scale = "row", clustering_distance_rows = "correlation", annotation_col = annotation, main = "Top 20 Differentially Expressed Genes", fontsize_row = 5)
+```
+
+<br>
+
+**A searchable table of statistically significant DEGs**:
+
+```{r}
+#forming searchable data table of DEGs
+DT_DEGs <- order_sigres %>% dplyr::select(ENSEMBL, SYMBOL, log2FoldChange, padj)
+
+
+library(DT)
+datatable(DT_DEGs)
+```
+
+<br>
+
+<br>
+
+```{r, include=FALSE}
+#Loading additional libraries:
+library(recount)
+library(DESeq2)
+library(tidyverse)
+library(ggpubr)
+library(EnsDb.Hsapiens.v86)
+library(msigdbr)
+library(clusterProfiler)
+```
+
+```{r, include=FALSE}
+#Applying LFC shrink to results:
+lfc_res <- lfcShrink(dds = dds, res = res, type = "apeglm", coef = 2)
+#Note: aware that Henry used "normal". I found on the documentation that apeglm was less biased (https://rdrr.io/bioc/DESeq2/man/lfcShrink.html), but need to find out which is right call in this circumstance. Also want to better understand role of coefficient. Use RPKM next time?
+```
+
+```{r, include=FALSE}
+#Adding in ENSEMBL and SYMBOL columns:
+lfcanno <- AnnotationDbi::select(org.Hs.eg.db, rownames(lfc_res),
+               columns = c("ENSEMBL", "ENTREZID", "SYMBOL"),
+               keytype = "ENSEMBL")
+lfc_res <- cbind(ENSEMBL = rownames(lfc_res), lfc_res)
+lfc_res_anno <- left_join(as.data.frame(lfc_res), lfcanno)
+head(lfc_res_anno)
+```
+
+# Gene Set Enrichment Analysis (GSEA)
+
+GSEA determines if a predefined set of genes is statistically significant between different conditions. In this analysis, MSigDB's [C5 gene ontology gene sets](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp) is used to identify sets of genes associated with biological pathways. 
+
+
+```{r, include=FALSE}
+#Now must create a data frame from lrc_res_anno (lra):
+lradf <- as.data.frame(lfc_res_anno)
+```
+
+```{r, include=FALSE}
+#Adding in a score as needed for GSEA:
+lradf2 <- lradf %>%
+  arrange(padj) %>%
+  mutate(gsea_metric = -log10(padj) * sign(log2FoldChange))
+```
+
+```{r, include=FALSE}
+#Dealing with any potential infinity values on the GSEA score. Inf values occur when -log10 as shown above is performed on results with a p value is less than the smallest number R is capable of using. This code replaces these very very small values with the smallest number possible to be used by R:
+lradf2 <- lradf2 %>%
+  mutate(padj = case_when(padj == 0 ~ .Machine$double.xmin,
+                          TRUE ~ padj)) %>%
+  mutate(gsea_metric = -log10(padj) * sign(log2FoldChange))
+
+#Note: data doesn't appear to have contained any potential infinity values after all, but including this is probably good practice? 
+```
+
+```{r, include=FALSE}
+#Arranging the GSEA scores from highest to lowest after filtering out NAs:
+lradf2 <- lradf2 %>%
+  filter(! is.na(gsea_metric)) %>%
+  arrange(desc(gsea_metric))
+```
+
+```{r, include = FALSE}
+min(lradf2$gsea_metric)
+max(lradf2$gsea_metric)
+```
+
+
+### GSEA metrics
+
+In order to perform GSEA on the DEGs, a GSEA metric was created by finding -log10(padj) * sign(log2FoldChange) for each DEG. The frequencies of values of this metric are reported in a histogram below. While most values are clustered around 0, the maximum and minimum values are 155.3 and -307.7 respectively. 
+
+**Histogram of frequencies of GSEA metrics:**
+
+```{r, include = FALSE}
+gseahist <- ggplot(data = lradf2, aes(lradf2$gsea_metric)) +     geom_histogram(bins = 30,
+               col = "#117C6F",
+               fill = "#2FC4B2",
+               alpha = 0.5) +
+  labs(x="GSEA Metric", y="Count")  
+
+gseahist <- gseahist + theme_classic()
+
+```
+
+```{r, warning=FALSE}
+gseahist
+```
+
+<br>
+ 
+```{r, include=FALSE}
+#Creating the ranked GSEA vector:
+library(dplyr)
+rankings <- lradf2 %>%
+  dplyr::select(SYMBOL, gsea_metric) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  deframe()
+
+#Note: have to use dplyr:: to specify that I want to use dplyr's select, otherwise doesn't work!!! 
+```
+
+```{r, include=FALSE}
+#Creating a gene set to use in GSEA:
+library(msigdbr)
+gene_sets <- msigdbr(species = "Homo sapiens", category = "C5")
+gene_sets <- gene_sets %>%
+  dplyr::select(gs_name, gene_symbol)
+```
+
+```{r, include=FALSE}
+#Resorting the rankings to make sure that GSEA will accept them (did not accept rankings alone)
+GLranks = sort(rankings, decreasing = TRUE)
+class(GLranks)
+```
+
+```{r, include=FALSE}
+#Performing GSEA on the rankings found by sorting GSEA scores highest to lowest:
+library(clusterProfiler)
+res_gsea <- GSEA(geneList = GLranks, 
+                TERM2GENE = gene_sets)
+dfres_gsea <- as.data.frame(res_gsea)
+View(dfres_gsea)
+
+#Note: warns about arbitrary order of tied genes but seems ok overall 
+```
+
+## Performing GSEA 
+
+Using rankings created from the GSEA metric calculated above and the C5 gene set from MSigDB, GSEA is performed using clusterProfiler. The enriched pathways found through GSEA are reported in the table below. As well as the pathway's ID, its raw enrichment score, its normalised enrichment score (NES) and p-adjusted score are given.  
+
+
+```{r, include=FALSE}
+#Finding the top 5 pathways:
+dfres_gseasort <- dfres_gsea %>%
+  dplyr::arrange(desc(NES))
+```
+
+**A searchable table of GSEA pathways:**
+
+```{r}
+gseasort_dt <- dfres_gseasort %>% dplyr::select(enrichmentScore, NES, p.adjust)
+datatable(gseasort_dt)
+```
+
+<br>
+
+**Reporting the 5 most overexpressed pathways:**
+
+
+```{r}
+gsea5over <- as.matrix(setNames(dfres_gseasort[1:5,1],NULL))
+gsea5over <- as.data.frame(table(gsea5over, dnn = list("Top 5 Overrepresented Pathways")))
+datatable(gsea5over)
+```
+
+<br>
+
+**Reporting the 5 most underexpressed pathways:**
+
+```{r, include= FALSE}
+dfres_gseasorttail <- dfres_gsea %>%
+  dplyr::arrange(NES)
+```
+```{r}
+gsea5under <- as.matrix(setNames(dfres_gseasorttail[1:5,1],NULL))
+gsea5under <- as.data.frame(table(gsea5under, dnn = list("Top 5 Underrepresented Pathways")))
+datatable(gsea5under)
+```
+
+<br>
+
+```{r, include=FALSE}
+#Creating plots for each pathway:
+first_plot <- gseaplot(res_gsea, geneSetID = "GO_DNA_PACKAGING_COMPLEX", title = "GO_DNA_PACKAGING_COMPLEX", color = "#660033", color.line = "#FF6666", color.vline = "#FF9900")
+
+second_plot <- gseaplot(res_gsea, geneSetID = "GO_NUCLEOSOME_ORGANIZATION", title = "GO_NUCLEOSOME_ORGANIZATION", color = "#660033", color.line = "#FF6666", color.vline = "#FF9900")
+
+third_plot <- gseaplot(res_gsea, geneSetID = "GO_NUCLEOSOME_ASSEMBLY", title = "GO_NUCLEOSOME_ASSEMBLY", color = "#660033", color.line = "#FF6666", color.vline = "#FF9900")
+
+fourth_plot <- gseaplot(res_gsea, geneSetID = "GO_PROTEIN_DNA_COMPLEX_SUBUNIT_ORGANIZATION", title = "GO_PROTEIN_DNA_COMPLEX_SUBUNIT_ORGANIZATION", color = "#660033", color.line = "#FF6666", color.vline = "#FF9900")
+
+fifth_plot <- gseaplot(res_gsea, geneSetID = "GO_NEGATIVE_REGULATION_OF_GENE_EXPRESSION_EPIGENETIC", title = "GO_NEGATIVE_REGULATION_OF_GENE_EXPRESSION_EPIGENETIC", color = "#660033", color.line = "#FF6666", color.vline = "#FF9900")
+
+```
+
+
+## A visualisation of GSEA: Enrichment plot
+
+**Enrichment plot for the most overrepresented pathway, GO_DNA_PACKAGING_COMPLEX:**
+
+```{r, include=TRUE}
+#Viewing plots individually
+first_plot
+```
+```{r, include=FALSE}
+#second_plot
+```
+```{r, include=FALSE}
+#third_plot
+```
+```{r, include=FALSE}
+#fourth_plot
+```
+```{r, include=FALSE}
+#fifth_plot
+```
+
+
+```{r, include=TRUE}
+#Using gridExtra to arrange them all together:
+#library(gridExtra)
+#library(grid)
+#library(lattice)
+
+
+#grid.arrange(first_plot, second_plot, third_plot, fourth_plot, fifth_plot, ncol = 3)   
+
+#Note: this graph looks shocking on my computer, which is why I did all the plots individually too, as at least that way each can be seen properly.
+
+```
+
+
+
+```{r, include=FALSE}
+#A more compact way to create a combined plot of top 5 pathways:
+#library(ggpubr)
+
+#top_pathways <- dfres_gseasort %>%
+  #top_n(n = 5, wt = NES) %>%
+  #pull(ID)
+# -- Make gseaplot for each and return as list
+#top_pathway_plots <- lapply(top_pathways, function(pathway) {
+  #gseaplot(res_gsea, geneSetID = pathway, title = pathway)
+#})
+# -- Arrange with labels as a multi-panel plot
+#top_pathway_plot <- ggarrange(plotlist = top_pathway_plots,
+                              #ncol = 3, nrow = 2, labels = "AUTO")
+#Note: this doesn't show up well on my computer either, so did #individual graphs in case this will be a problem everywhere. 
+```
+```{r, include=FALSE}
+#top_pathway_plot
+```
+
+
+<br>
+
+# Analysis 
+
+The top 5 pathways found through GSEA analysis are:         
+
+  - GO_DNA_PACKAGING_COMPLEX 
+  
+  - GO_NUCLEOSOME_ORGANIZATION 
+  
+  - GO_NUCLEOSOME_ASSEMBLY 
+  
+  - GO_PROTEIN_DNA_COMPLEX_SUBUNIT_ORGANIZATION 
+  
+  - GO_NEGATIVE_REGULATION_OF_GENE_EXPRESSION_EPIGENETIC
+  
+The above indicates that the top pathways associated with listeria infections (which are caused by Listeria monocytogenes bacteria) are linked to how DNA is organised and packed.
+
+Two pathways, *GO_NUCLEOSOME ORGANIZATION* and *GO_NUCLEOSOME_ASSEMBLY*, are associated with the organisation and assembly of the nucleosome (1) (2). The nucleosome contains DNA, which is wrapped around histone proteins inside the nucleus of eukaryotic cells. It is a component of chromatin - the organisation of which is also impacted by *GO_DNA_PACKING_COMPLEX* (3). As histone binds to DNA and thus forms a protein-DNA complex (4), the  *GO_PROTEIN_DNA_COMPLEX_SUBUNIT_ORGANIZATION* pathway may thus show that processes linked to the 'formation, disassembly or alteration' of histone are occuring in the patients with listeria (5). Finally, *GO_NEGATIVE_REGULATION_OF_GENE_EXPRESSION_EPIGENETIC* is associated with dampening gene expression (6).
+
+Previous research has found that listeria manipulates chromatin in order to alter cell transcription behaviour and uses its secreted virulence factor LntA to control patients' gene expression (7). In regards to L. monocytogenes, the production of LntA by these bacteria inhibits the BAHD1 protein from expressing ISGs (Interferon Stimulated Genes) which prevent infection. This allows L. monocytogenes to open the chromatin and acetylate histones. It is suggested that L. monocytogenes may do this in a controlled and intentional way in order to modulate ISG expression during colonisation (8)
+
+This research links to my findings of the overrepresentation of pathways linked to chromatin (re)organisation and negative regulation of gene expression in patients with listeria. While in my analysis BAHD1 had only a very slightly underexpressed GSEA metric (-1.87, p = 0.004/padj = 0.01), this could be explained by the fact that the point of infection at which L. monocytogenes secretes LtnA in order to inhibit BAHD1 remains unknown (9) - the RNA-Seq data may just have been captured too late in the infection for this effect to be visible. Importantly, the most inhibited pathways from my analysis (*GO_INTERFERON_GAMMA_MEDIATED_SIGNALING_PATHWAY*, *GO_RESPONSE_TO_TYPE_I_INTERFERON*, *GO_RESPONSE_TO_INTERFERON_GAMMA*) link to interferon and responses to it, which suggests that the inhibition of ISGs in order to allow colonisation may have already taken place. 
+
+In order to expand upon my findings, it would be interesting to analyse RNA data extracted at different points in the infection from multiple patients, to hopefully see when BAHD1 inhibition was at its greatest. It would also be good to perform my analyses on a larger sample to see if my results from this (small) study were corroborated. 
+
+
+### Sources
+
+1. http://amigo.geneontology.org/amigo/term/GO:0034728
+2. http://amigo.geneontology.org/amigo/term/GO:0006334
+3. Hanna Leins, Medhanie Mulaw, Karina Eiwen, Vadim Sakk, Ying Liang, Michael Denkinger, Hartmut Geiger, Reinhold Schirmbeck; Aged murine hematopoietic stem cells drive aging-associated immune remodeling. Blood 2018; 132 (6): 565–576
+4. Luscombe, N.M., Austin, S.E., Berman, H.M. et al. An overview of the structures of protein-DNA complexes. Genome Biol 1, reviews001.1 (2000)
+5. http://amigo.geneontology.org/amigo/term/GO:0071824
+6. http://amigo.geneontology.org/amigo/term/GO:0045814
+7. Lebreton A, Lakisic G, Job V, et al. A Bacterial Protein Targets the BAHD1 Chromatin Complex to Stimulate Type III Interferon Response. Science. 2011;331(6022):1319
+8. Bierne, H, Hamon, M. Targeting host epigenetic machinery: The Listeria paradigm. Cellular Microbiology. 2020; 22:e13169
+9. Lebreton A, Job V, Ragon M, et al. Structural Basis for the Inhibition of the Chromatin Repressor BAHD1 by the Bacterial Nucleomodulin LntA. mBio. 2014;5(1):e00775-13
+
+
